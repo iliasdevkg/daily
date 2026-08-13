@@ -1,0 +1,181 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Lint ─────────────────────────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: "npm", cache-dependency-path: backend/package-lock.json }
+      - run: npm ci
+        working-directory: backend
+      # No eslint config exists in backend/ yet — `node --check` is a real,
+      # zero-config syntax gate rather than a fake pass-through step.
+      - name: Syntax check every backend source file
+        working-directory: backend
+        run: find src -name "*.js" -exec node --check {} \;
+
+  # ── Tests ────────────────────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: delivery_db
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: "npm", cache-dependency-path: backend/package-lock.json }
+      - run: npm ci
+        working-directory: backend
+      - name: Load schema
+        run: psql "postgresql://postgres:postgres@localhost:5432/delivery_db" -f backend/src/config/init.sql
+        env: { PGPASSWORD: postgres }
+      - name: Start backend
+        working-directory: backend
+        run: |
+          nohup node src/app.js > server.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://localhost:3001/api/health && break || sleep 1; done
+        env:
+          NODE_ENV: test
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: delivery_db
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          JWT_SECRET: ci-test-secret-not-for-production
+          REDIS_URL: redis://localhost:6379
+      - name: Run integration tests
+        working-directory: backend
+        run: npm test
+      - name: Show server log on failure
+        if: failure()
+        run: cat backend/server.log
+
+  # ── Build (frontend apps) ───────────────────────────────────────────
+  build-frontend:
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      matrix: { app: [admin-web, frontend, delivery-app, picker-app] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: "npm", cache-dependency-path: "${{ matrix.app }}/package-lock.json" }
+      - run: npm ci
+        working-directory: ${{ matrix.app }}
+      - run: npm run build
+        working-directory: ${{ matrix.app }}
+
+  # ── Security scan ───────────────────────────────────────────────────
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: npm audit (backend)
+        working-directory: backend
+        run: npm audit --audit-level=high
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "0" # report-only for now — flip to "1" to hard-fail the pipeline once the baseline is triaged
+
+  # ── Docker build ─────────────────────────────────────────────────────
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [test, build-frontend, security-scan]
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build + push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Deploy ───────────────────────────────────────────────────────────
+  deploy:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - name: Trigger Render deploy
+        # Render's deploy hook URL — set as a repo secret, not hardcoded.
+        # (Render redeploys on git push by default; this hook is for the
+        # case where auto-deploy is turned off in favor of this pipeline
+        # gating the deploy on tests/security-scan passing first.)
+        run: |
+          if [ -z "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" ]; then
+            echo "RENDER_DEPLOY_HOOK_URL secret жок — деплой кадамы аткарылган жок (документтерди караңыз)"
+            exit 0
+          fi
+          curl -sf "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+
+      - name: Wait for the new deploy to become healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf "${{ secrets.PRODUCTION_HEALTH_URL }}/api/health"; then
+              echo "Backend соо"; exit 0
+            fi
+            sleep 10
+          done
+          echo "Backend 5 мүнөттөн кийин деле соо болгон жок" >&2
+          exit 1
+
+      - name: Smoke test — health, ready, and a real read endpoint
+        run: |
+          set -e
+          curl -sf "${{ secrets.PRODUCTION_HEALTH_URL }}/api/health"
+          curl -sf "${{ secrets.PRODUCTION_HEALTH_URL }}/api/ready"
+          curl -sf "${{ secrets.PRODUCTION_HEALTH_URL }}/api/products" > /dev/null
+
+      - name: Rollback on smoke test failure
+        if: failure()
+        run: |
+          echo "Smoke test ишке ашкан жок. Render'де мурунку 'Deploy' жазуусун 'Rollback to this deploy' менен кайра түшүрүңүз (Render UI/API аркылуу) — бул кадам аны эскертет, автоматтык rollback API-акысы Render'дин планына жараша."
+          exit 1

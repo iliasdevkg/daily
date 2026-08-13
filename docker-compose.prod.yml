@@ -1,0 +1,184 @@
+# Production stack. Postgres/Redis are included here as a self-hosted
+# option, but the recommended production setup points DATABASE_URL/
+# REDIS_URL at managed services (Supabase, Upstash/Redis Cloud, etc.) —
+# see PRODUCTION_HARDENING_REPORT.md and the scalability plan for why
+# (automated backups, read replicas, and failover are someone else's
+# operational problem at that point, not this compose file's).
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml up -d --scale worker=3
+#
+# Required before first run:
+#   1. cp backend/.env.example backend/.env.production and fill in real
+#      values (JWT_SECRET, DATABASE_URL or DB_*, REDIS_URL, SENTRY_DSN, ...)
+#   2. Point api.daily.kg / admin.daily.kg / daily.kg DNS at this host
+#   3. ./scripts/init-letsencrypt.sh (see script) to issue real certificates
+#      before nginx can serve HTTPS — nginx.conf expects them to already
+#      exist at /etc/letsencrypt/live/<domain>/
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: [backend/.env.production]
+    environment:
+      POSTGRES_DB: ${DB_NAME:-delivery_db}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/src/config/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits: { memory: 1G }
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits: { memory: 384M }
+
+  backend:
+    build: { context: ./backend, dockerfile: Dockerfile }
+    restart: unless-stopped
+    env_file: [backend/.env.production]
+    environment:
+      NODE_ENV: production
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/api/ready', r => process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      replicas: 2 # horizontal scaling proof-of-concept — needs REDIS_URL set for bus.js/queue.js to coordinate across replicas
+      resources:
+        limits: { memory: 512M }
+        reservations: { memory: 256M }
+
+  worker:
+    build: { context: ./backend, dockerfile: Dockerfile }
+    command: node src/worker.js
+    restart: unless-stopped
+    env_file: [backend/.env.production]
+    environment:
+      NODE_ENV: production
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      backend: { condition: service_started }
+    deploy:
+      replicas: 2
+      resources:
+        limits: { memory: 384M }
+
+  admin-web:
+    build: { context: ./admin-web, dockerfile: Dockerfile }
+    restart: unless-stopped
+    depends_on: [backend]
+
+  frontend:
+    build: { context: ./frontend, dockerfile: Dockerfile }
+    restart: unless-stopped
+    depends_on: [backend]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certbot/conf:/etc/letsencrypt:ro
+      - ./nginx/certbot/www:/var/www/certbot:ro
+    depends_on: [backend, admin-web, frontend]
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - ./nginx/certbot/conf:/etc/letsencrypt
+      - ./nginx/certbot/www:/var/www/certbot
+    # Renews every 12h if due; Let's Encrypt certs are valid 90 days, this
+    # keeps them from ever getting within a week of expiry unattended.
+    entrypoint: sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h; done"
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    ports:
+      - "127.0.0.1:9090:9090" # internal only — not exposed publicly, see nginx.conf's /metrics IP allowlist for the same reasoning
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000" # put behind its own nginx server block + auth before exposing publicly
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_URI: "postgres:5432/${DB_NAME:-delivery_db}?sslmode=disable"
+      DATA_SOURCE_USER: ${DB_USER:-postgres}
+      DATA_SOURCE_PASS: ${DB_PASSWORD}
+    depends_on: [postgres]
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on: [redis]
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

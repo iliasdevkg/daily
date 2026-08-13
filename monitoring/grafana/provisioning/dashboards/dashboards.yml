@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: daily
+    folder: Daily
+    type: file
+    options:
+      path: /etc/grafana/dashboards

@@ -1,0 +1,69 @@
+{
+  "title": "Daily — Backend Overview",
+  "uid": "daily-overview",
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "title": "HTTP request rate", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{ "expr": "sum(rate(daily_http_requests_total[1m])) by (status_code)", "legendFormat": "{{status_code}}" }]
+    },
+    {
+      "id": 2, "title": "p50 / p95 / p99 response time", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(daily_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(daily_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(daily_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 3, "title": "Orders created (rate)", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "targets": [{ "expr": "rate(daily_orders_created_total[5m])", "legendFormat": "orders/sec" }]
+    },
+    {
+      "id": 4, "title": "Automation actions, by rule", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "targets": [{ "expr": "sum(rate(daily_automation_actions_total[5m])) by (action)", "legendFormat": "{{action}}" }]
+    },
+    {
+      "id": 5, "title": "Automation errors", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [{ "expr": "sum(rate(daily_automation_errors_total[5m])) by (step)", "legendFormat": "{{step}}" }]
+    },
+    {
+      "id": 6, "title": "Queue jobs, by outcome", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [{ "expr": "sum(rate(daily_queue_jobs_total[5m])) by (queue, outcome)", "legendFormat": "{{queue}} / {{outcome}}" }]
+    },
+    {
+      "id": 7, "title": "Process memory (RSS)", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 16 },
+      "targets": [{ "expr": "daily_process_resident_memory_bytes / 1024 / 1024", "legendFormat": "MB" }]
+    },
+    {
+      "id": 8, "title": "Process CPU", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 16 },
+      "targets": [{ "expr": "rate(daily_process_cpu_seconds_total[1m])", "legendFormat": "cores" }]
+    },
+    {
+      "id": 9, "title": "Postgres active connections", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [{ "expr": "sum(pg_stat_activity_count)", "legendFormat": "active" }]
+    },
+    {
+      "id": 10, "title": "Host CPU / memory / disk free %", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        { "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)", "legendFormat": "CPU used %" },
+        { "expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100", "legendFormat": "Memory used %" },
+        { "expr": "(1 - node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}) * 100", "legendFormat": "Disk used %" }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}

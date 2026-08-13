@@ -1,0 +1,31 @@
+# Зависимости
+node_modules/
+
+# Сборки
+build/
+dist/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# iOS / Xcode / SwiftPM
+**/ios/Pods/
+**/ios/Flutter/ephemeral/
+**/ios/.symlinks/
+**/ios/Runner.xcworkspace/xcshareddata/swiftpm/
+DerivedData/
+*.xcuserstate
+
+# Android
+**/android/.gradle/
+**/android/app/build/
+
+# Разное
+.DS_Store
+*.log
+.env
+.env.local
+.env.*
+!.env.example
+!**/.env.example
+backups/

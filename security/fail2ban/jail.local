@@ -1,0 +1,31 @@
+# Install on the production host (not in a container — fail2ban needs to
+# manipulate the host's iptables/nftables): apt install fail2ban, copy this
+# to /etc/fail2ban/jail.local and daily-auth.conf to
+# /etc/fail2ban/filter.d/, then `systemctl restart fail2ban`.
+#
+# This is IP-level banning, a layer below the app's own express-rate-limit
+# (app.js) — the app limiter says "slow down", fail2ban says "you're
+# banned from this host for a while" after a pattern that looks like an
+# actual attack, not just a chatty client.
+
+[daily-auth]
+enabled = true
+filter = daily-auth
+logpath = /var/log/nginx/access.log
+port = http,https
+maxretry = 10
+findtime = 600
+bantime = 3600
+action = iptables-multiport[name=daily-auth, port="http,https"]
+
+[daily-auth-aggressive]
+# A second, stricter jail: repeat offenders (banned by daily-auth 3+ times)
+# get a day-long ban instead of an hour.
+enabled = true
+filter = daily-auth
+logpath = /var/log/nginx/access.log
+port = http,https
+maxretry = 3
+findtime = 86400
+bantime = 86400
+action = iptables-multiport[name=daily-auth-aggressive, port="http,https"]

@@ -1,0 +1,19 @@
+{
+  "name": "delivery-app",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "NODE_ENV=development vite --port 5175",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react-swc": "^3.7.2",
+    "vite": "^5.4.19"
+  }
+}

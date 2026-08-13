@@ -1,0 +1,34 @@
+# render.yaml — Render Blueprint for the Express backend.
+# In Render: New → Blueprint → point at this repo → it reads this file.
+# rootDir tells Render the service lives in backend/, not the repo root,
+# since this is a monorepo with the web/Flutter apps alongside it.
+services:
+  - type: web
+    name: daily-backend
+    runtime: node
+    plan: free
+    region: frankfurt
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      # Render injects its own PORT automatically — do not set one here.
+      - key: NODE_ENV
+        value: production
+      # Secrets: filled in via the Render dashboard after first deploy
+      # (sync: false means "prompt for this, don't store it in git").
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: GOOGLE_WEB_CLIENT_ID
+        sync: false
+      # Upstash Redis connection string (rediss://...) — optional. Unset:
+      # bus.js/queue.js run in single-instance/local mode. Set: enables
+      # Redis pub/sub + BullMQ. ioredis auto-detects TLS from the
+      # rediss:// scheme, no extra config needed for Upstash.
+      - key: REDIS_URL
+        sync: false
